@@ -3,6 +3,8 @@ import e, { NextFunction, Request, Response } from 'express';
 import { MetricsService } from './metrics/metrics.service';
 import * as http from 'http-proxy';
 import * as auth from 'basic-auth';
+import * as dotenv from 'dotenv';
+dotenv.config();
 
 @Injectable()
 export class ProxyMiddleware implements NestMiddleware {
@@ -14,34 +16,23 @@ export class ProxyMiddleware implements NestMiddleware {
         this.proxy = http.createProxyServer({});
 
         this.proxy.on('eror', (err, req, res) => {
-            console.error('Proxy error:', err);
-            res.statusCode = 500;
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
             res.end('Proxy server error');
-        });
-
-        this.proxy.on('proxyRes', (proxyRes, req: Request, res: Response) => {
-            let bytesTransferred = 0;
-
-            proxyRes.on('data', (data: Buffer) => {
-                bytesTransferred += data.length;
-            });
-            proxyRes.on('end', () => {
-                this.metricsSerivce.incrementBandwidth(bytesTransferred);
-            })
         });
     };
 
     async use(req: Request, res: Response, next: NextFunction) {
-        if (req.path === '/metrics') {
-            next();
-            return;
+        if (req.baseUrl === '/metrics') {
+            console.log('Skipping authentication for /metrics endpoint');
+            return next();
         }
 
         const creds = auth(req);
 
         if (!creds || creds.name !== this.username || creds.pass !== this.password) {
-            res.set('WWW-Authenticate', 'Basic');
-            res.status(401).end('Authentication required.');
+            res.statusCode = 401;
+            res.setHeader('WWW-Authenticate', 'Basic realm="proxy"');
+            res.end('Access denied');
             return;
         }
 
@@ -61,6 +52,26 @@ export class ProxyMiddleware implements NestMiddleware {
         req.url = url.pathname + url.search;
         const protocol = url.protocol;
 
+        let totalBytes = 0;
+        let originalWrite = res.write;
+        let originalEnd = res.end;
+        const metricsService = this.metricsSerivce;
+
+        res.write = (chunk, ...args) => {
+            if (chunk) {
+              totalBytes += Buffer.byteLength(chunk);
+            }
+            return originalWrite.apply(res, [chunk, ...args]);
+        };
+
+        res.end = (chunk, ...args) => {
+            if (chunk) {
+              totalBytes += Buffer.byteLength(chunk);
+            }
+            metricsService.incrementBandwidth(totalBytes);
+            return originalEnd.apply(res, [chunk, ...args]);
+        };
+
         this.proxy.web(
             req, 
             res,
@@ -69,6 +80,6 @@ export class ProxyMiddleware implements NestMiddleware {
                 console.error('Proxy error:', err);
                 res.status(500).end('Internal server error');
             }
-        )
+        );
     }
 }
