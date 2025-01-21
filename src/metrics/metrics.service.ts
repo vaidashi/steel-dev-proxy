@@ -2,12 +2,17 @@ import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { IMetrics } from './types/metrics.interface';
 
 @Injectable()
-export class MetricsService implements OnApplicationShutdown{
+export class MetricsService implements OnApplicationShutdown {
     public totalBandwidth = 0;
-    public siteVisits: { [key: string]: number} = {};
+    public siteVisits: { [key: string]: number } = {};
+
+    constructor() {
+        console.log('MetricsService instantiated');
+    }
 
     incrementBandwidth(bytes: number) {
         this.totalBandwidth += bytes;
+        console.log(`Incremented bandwidth by ${bytes} bytes. Total is now ${this.totalBandwidth} bytes.`);
     }
 
     incrementSiteVisits(site: string) {
@@ -18,10 +23,14 @@ export class MetricsService implements OnApplicationShutdown{
     }
 
     getServerMetrics(): IMetrics {
+        console.log('Generating metrics...');
+        console.log('Total Bandwidth:', this.totalBandwidth);
+        console.log('Site Visits:', this.siteVisits);
+
         const topSites = Object.entries(this.siteVisits).map(([url, visits]) => (
             { url, visits })
         );
-       
+
         return {
             bandwidth_usage: this.formatBytes(this.totalBandwidth),
             top_sites: topSites,
@@ -48,10 +57,10 @@ export class MetricsService implements OnApplicationShutdown{
     }
 
     onApplicationShutdown(signal: string) {
-        console.log(`Received shutdown signal: ${signal}`);
+        console.log(`Received shutdown signal: ${signal}\n`);
         const metricsSummary = this.getSummaryMetrics();
 
-        console.log('Metrics Summary:');
+        console.log('-------------Metrics Summary---------------');
         console.log(`Total Bandwidth: ${metricsSummary.bandwidth_usage}`);
         console.log('Top Sites:');
         metricsSummary.top_sites.forEach((site, index) => {

@@ -1,142 +1,170 @@
-import { Injectable, NestMiddleware } from '@nestjs/common';
-import e, { NextFunction, Request, Response } from 'express';
+import { NextFunction, Request, Response } from 'express';
 import { MetricsService } from './metrics/metrics.service';
 import * as http from 'http-proxy';
-import * as auth from 'basic-auth';
 import * as dotenv from 'dotenv';
 import * as net from 'net';
 
 dotenv.config();
 
-@Injectable()
-export class ProxyMiddleware implements NestMiddleware {
-    private proxy: http.Proxy;
-    private username: string = process.env.PROXY_USERNAME;
-    private password: string = process.env.PROXY_PASSWORD;
+export function createProxyMiddleware(metricsService: MetricsService) {
+    const proxy = http.createProxyServer({});
 
-    constructor(private metricsSerivce: MetricsService) {
-        this.proxy = http.createProxyServer({});
-
-        this.proxy.on('eror', (err, req, res) => {
+    proxy.on('error', (err, req, res) => {
+        if (res && !res.headersSent) {
             res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Proxy server error');
-        });
+        }
+        res.end('Internal server error');
+    });
+
+    return function (req: Request, res: Response, next: NextFunction) {
+        const username = process.env.PROXY_USERNAME;
+        const password = process.env.PROXY_PASSWORD;
+
+        if (req.method === 'CONNECT') {
+            next();
+        }
+
+        handleHttpRequest(req, res, metricsService, proxy, username, password);
+    }
+}
+
+function parseProxyAuth(req: Request): { name: string, pass: string } | undefined {
+    const authHeader = req.headers['proxy-authorization'] as string;
+
+    if (!authHeader) {
+        return undefined;
+    }
+
+    const match = authHeader.match(/^Basic (.+)$/);
+
+    if (!match) {
+        return undefined;
+    }
+
+    const creds = Buffer.from(match[1], 'base64').toString('utf-8');
+    const [username, password] = creds.split(':');
+    return { name: username, pass: password };
+}
+
+function handleHttpRequest(
+    req: Request,
+    res: Response,
+    metricsService: MetricsService,
+    proxy: http.Proxy,
+    username: string,
+    password: string,
+) {
+    const creds = parseProxyAuth(req);
+
+    if (!creds || creds.name !== username || creds.pass !== password) {
+        res.statusCode = 407;
+        res.setHeader('Proxy-Authenticate', 'Basic realm="proxy"');
+        res.end('Access denied: Proxy Authentication Required');
+
+        return;
+    }
+
+    const targetUrl = req.url;
+    let url: URL;
+
+    try {
+        url = new URL(targetUrl);
+    } catch (err) {
+        res.statusCode = 400;
+        res.end('Invalid URL');
+        return;
+    }
+
+    metricsService.incrementSiteVisits(url.hostname);
+
+    req.url = url.pathname + url.search;
+    const protocol = url.protocol;
+
+    let totalBytes = 0;
+    let originalWrite = res.write;
+    let originalEnd = res.end;
+
+    res.write = (chunk, ...args) => {
+        if (chunk) {
+            totalBytes += Buffer.byteLength(chunk);
+        }
+        return originalWrite.apply(res, [chunk, ...args]);
     };
 
-    async use(req: Request, res: Response, next: NextFunction) {
-        if (req.method === 'CONNECT') {
-            // Handle HTTPS proxying
-            await this.handleHttpsConnect(req, res);
-            return;
+    res.end = (chunk, ...args) => {
+        if (chunk) {
+            totalBytes += Buffer.byteLength(chunk);
         }
+        metricsService.incrementBandwidth(totalBytes);
+        return originalEnd.apply(res, [chunk, ...args]);
+    };
 
-        if (req.baseUrl === '/metrics') {
-            console.log('Skipping authentication for /metrics endpoint');
-            return next();
+    proxy.web(
+        req,
+        res,
+        { target: protocol + '//' + url.host, changeOrigin: true },
+        (err) => {
+            console.error('Proxy error:', err);
         }
+    );
+}
 
-        await this.handleHttpRequest(req, res);
-    }
+export function handleHttpsConnect(
+    req: Request,
+    clientSocket: net.Socket,
+    head: Buffer,
+    metricsService: MetricsService,
+    username: string,
+    password: string) {
+    const creds = parseProxyAuth(req);
 
-    private async handleHttpRequest(req: Request, res: Response) {
-        const creds = auth(req);
-
-        if (!creds || creds.name !== this.username || creds.pass !== this.password) {
-            res.statusCode = 401;
-            res.setHeader('WWW-Authenticate', 'Basic realm="proxy"');
-            res.end('Access denied');
-            return;
-        }
-
-        const targetUrl = req.url;
-
-        let url: URL;
-
-        try {
-            url = new URL(targetUrl);
-        } catch (err) {
-            res.status(400).end('Invalid URL');
-            return;
-        }
-
-        this.metricsSerivce.incrementSiteVisits(url.hostname);
-
-        req.url = url.pathname + url.search;
-        const protocol = url.protocol;
-
-        let totalBytes = 0;
-        let originalWrite = res.write;
-        let originalEnd = res.end;
-        const metricsService = this.metricsSerivce;
-
-        res.write = (chunk, ...args) => {
-            if (chunk) {
-              totalBytes += Buffer.byteLength(chunk);
-            }
-            return originalWrite.apply(res, [chunk, ...args]);
-        };
-
-        res.end = (chunk, ...args) => {
-            if (chunk) {
-              totalBytes += Buffer.byteLength(chunk);
-            }
-            metricsService.incrementBandwidth(totalBytes);
-            return originalEnd.apply(res, [chunk, ...args]);
-        };
-
-        this.proxy.web(
-            req, 
-            res,
-            { target: protocol + '//' + url.host, changeOrigin: true },
-            (err) => {
-                console.error('Proxy error:', err);
-                res.status(500).end('Internal server error');
-            }
+    if (!creds || creds.name !== username || creds.pass !== password) {
+        clientSocket.write(
+            'HTTP/1.1 407 Proxy Authentication Required\r\n' +
+            'Proxy-Authenticate: Basic realm="proxy"\r\n' +
+            '\r\n',
         );
+        clientSocket.destroy();
+        return;
     }
 
-    private async handleHttpsConnect(req: Request, res: Response) {
-        const creds = auth(req);
-        
-        if (!creds || creds.name !== this.username || creds.pass !== this.password) {
-            res.statusCode = 407;
-            res.setHeader('WWW-Authenticate', 'Basic realm="proxy"');
-            res.end('Proxy Authentication Required');
-            return;
+    const [hostname, port] = req.url.split(':');
+    const targetPort = parseInt(port) || 443;
+    const serverSocket = net.connect(targetPort, hostname);
+
+    serverSocket.on('connect', () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+        if (head && head.length) {
+            serverSocket.write(head);
         }
 
-        const [hostname, port] = req.url.split(':');
+        attachDataHandlers(clientSocket, serverSocket, metricsService);
 
-        const socket = net.connect(parseInt(port) || 443, hostname, () => {
-            res.writeHead(200, 'Connection Established');
-            res.flushHeaders();
+        clientSocket.pipe(serverSocket);
+        serverSocket.pipe(clientSocket);
+        metricsService.incrementSiteVisits(hostname);
+    });
 
-            socket.pipe(res.socket as net.Socket);
-            (res.socket as net.Socket).pipe(socket);
-        });
+    serverSocket.on('error', (err) => {
+        console.error('Server socket error:', err.message);
+        clientSocket.destroy();
+    });
 
-        socket.on('error', (err) => {
-            console.error('Socket error:', err);
-            res.writeHead(500);
-            res.end('Internal server error');
-        });
+    clientSocket.on('error', (err) => {
+        console.error('Client socket error:', err.message);
+        serverSocket.destroy();
+    });
+}
 
-        let bytesFromServer = 0;
-        let bytesFromClient = 0;
+function attachDataHandlers(clientSocket: net.Socket, serverSocket: net.Socket, metricsService: MetricsService) {
+    clientSocket.on('data', (chunk: Buffer) => {
+        console.log('bytesFromClient', chunk.length);
+        metricsService.incrementBandwidth(chunk.length);
+    });
 
-        socket.on('data', (chunk: Buffer) => {
-            bytesFromServer += chunk.length;
-        });
-
-        (res.socket as net.Socket).on('data', (chunk: Buffer) => {
-            bytesFromClient += chunk.length;
-        });
-
-        socket.on('end', () => {
-            const totalBytes = bytesFromClient + bytesFromServer;
-            this.metricsSerivce.incrementBandwidth(totalBytes);
-
-            this.metricsSerivce.incrementSiteVisits(hostname);
-        });
-    }
+    serverSocket.on('data', (chunk: Buffer) => {
+        console.log('bytesFromServer', chunk.length);
+        metricsService.incrementBandwidth(chunk.length);
+    });
 }
