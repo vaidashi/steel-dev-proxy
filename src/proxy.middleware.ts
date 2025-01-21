@@ -4,6 +4,8 @@ import { MetricsService } from './metrics/metrics.service';
 import * as http from 'http-proxy';
 import * as auth from 'basic-auth';
 import * as dotenv from 'dotenv';
+import * as net from 'net';
+
 dotenv.config();
 
 @Injectable()
@@ -22,11 +24,21 @@ export class ProxyMiddleware implements NestMiddleware {
     };
 
     async use(req: Request, res: Response, next: NextFunction) {
+        if (req.method === 'CONNECT') {
+            // Handle HTTPS proxying
+            await this.handleHttpsConnect(req, res);
+            return;
+        }
+
         if (req.baseUrl === '/metrics') {
             console.log('Skipping authentication for /metrics endpoint');
             return next();
         }
 
+        await this.handleHttpRequest(req, res);
+    }
+
+    private async handleHttpRequest(req: Request, res: Response) {
         const creds = auth(req);
 
         if (!creds || creds.name !== this.username || creds.pass !== this.password) {
@@ -81,5 +93,50 @@ export class ProxyMiddleware implements NestMiddleware {
                 res.status(500).end('Internal server error');
             }
         );
+    }
+
+    private async handleHttpsConnect(req: Request, res: Response) {
+        const creds = auth(req);
+        
+        if (!creds || creds.name !== this.username || creds.pass !== this.password) {
+            res.statusCode = 407;
+            res.setHeader('WWW-Authenticate', 'Basic realm="proxy"');
+            res.end('Proxy Authentication Required');
+            return;
+        }
+
+        const [hostname, port] = req.url.split(':');
+
+        const socket = net.connect(parseInt(port) || 443, hostname, () => {
+            res.writeHead(200, 'Connection Established');
+            res.flushHeaders();
+
+            socket.pipe(res.socket as net.Socket);
+            (res.socket as net.Socket).pipe(socket);
+        });
+
+        socket.on('error', (err) => {
+            console.error('Socket error:', err);
+            res.writeHead(500);
+            res.end('Internal server error');
+        });
+
+        let bytesFromServer = 0;
+        let bytesFromClient = 0;
+
+        socket.on('data', (chunk: Buffer) => {
+            bytesFromServer += chunk.length;
+        });
+
+        (res.socket as net.Socket).on('data', (chunk: Buffer) => {
+            bytesFromClient += chunk.length;
+        });
+
+        socket.on('end', () => {
+            const totalBytes = bytesFromClient + bytesFromServer;
+            this.metricsSerivce.incrementBandwidth(totalBytes);
+
+            this.metricsSerivce.incrementSiteVisits(hostname);
+        });
     }
 }

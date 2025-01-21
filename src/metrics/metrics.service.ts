@@ -23,7 +23,7 @@ export class MetricsService implements OnApplicationShutdown{
         );
        
         return {
-            bandwidth_usage: this.totalBandwidth.toString(),
+            bandwidth_usage: this.formatBytes(this.totalBandwidth),
             top_sites: topSites,
         };
     }
@@ -35,15 +35,22 @@ export class MetricsService implements OnApplicationShutdown{
             .slice(0, 5);
 
         return {
-            bandwidth_usage: this.totalBandwidth.toString(),
+            bandwidth_usage: this.formatBytes(this.totalBandwidth),
             top_sites: topSites,
         };
+    }
+
+    private formatBytes(bytes: number): string {
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        if (bytes === 0) return '0 Byte';
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i]);
     }
 
     onApplicationShutdown(signal: string) {
         console.log(`Received shutdown signal: ${signal}`);
         const metricsSummary = this.getSummaryMetrics();
-        
+
         console.log('Metrics Summary:');
         console.log(`Total Bandwidth: ${metricsSummary.bandwidth_usage}`);
         console.log('Top Sites:');
