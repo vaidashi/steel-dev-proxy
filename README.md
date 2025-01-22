@@ -1,6 +1,6 @@
 ## Description
 
-https://steel-dev.notion.site/Proxy-Server-Challenge-17c518e4524180e5982fd91333c36504
+Proxy server using NestJS that tracks bandwidth usage and site analytics; specifically site vists. 
 
 1. Install [npm](https://www.npmjs.com/)
 1. Create a .env and set the following, or any other values and adjust testing commands below.
@@ -43,5 +43,16 @@ curl -x http://localhost:3000 --proxy-user username:password -L https://www.goog
 
 #### For /metrics
 ```bash
-curl -u username:password http://localhost:3000/metrics
+curl http://localhost:3000/metrics
+```
+
+Upon server shutdown, a summary of metrics will be outputted to the console, listing total bandwidth and top visited sites in sorted order. 
+
+```bash
+-------------Metrics Summary---------------
+Total Bandwidth: 49.08 KB
+Top Sites:
+1. www.google.com - 2 visits
+2. www.example.com - 1 visits
+
 ```
